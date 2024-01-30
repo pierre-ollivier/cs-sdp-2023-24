@@ -202,7 +202,7 @@ class TwoClustersMIP(BaseModel):
 
     def u_k_i(self, k, i, X, values: bool = False):
         x = X[i]
-        if x == self.maxs[i]:
+        if x >= self.maxs[i]:
             return self.Us[k][i][-1] if not values else self.Us[k][i][-1].X
         l = math.floor(self.L * (x - self.mins[i]) / (self.maxs[i] - self.mins[i]))
         x_l = self.mins[i] + l * (self.maxs[i] - self.mins[i]) / self.L
