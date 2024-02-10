@@ -1,9 +1,14 @@
+import math
 import pickle
 from abc import abstractmethod
-import math
 
+import metrics
 import numpy as np
 from gurobipy import *
+from sklearn.cluster import KMeans
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from python.uta import PairwiseUTA
 
 
 class BaseModel(object):
@@ -180,11 +185,9 @@ class TwoClustersMIP(BaseModel):
         self.n = n_criteria
         self.epsilon = precision
         self.model = self.instantiate()
-        # self.model.setParam(GRB.Param.FeasibilityTol, precision * 2)
 
     def instantiate(self):
         """Instantiation of the MIP Variables - To be completed."""
-        # To be completed
         model = Model("Simple PL modelling")
         self.Xs = [model.addVar(name=f"x_{i}") for i in range(self.n)]
         self.Us = [
@@ -197,7 +200,6 @@ class TwoClustersMIP(BaseModel):
         # Function must be non-decreasing
         for k, i, l in zip(range(self.K), range(self.n), range(self.L - 1)):
             model.addConstr(self.Us[k][i][l] <= self.Us[k][i][l + 1])
-        # self.model.setObjective(sum(sigma_plus) + sum(sigma_minus), GRB.MAXIMIZE)
         return model
 
     def u_k_i(self, k, i, X, values: bool = False):
@@ -251,7 +253,7 @@ class TwoClustersMIP(BaseModel):
 
         self.underestimation_variables = []
         self.overestimation_variables = []
-        # To be completed
+
         for index, couple in enumerate(zip(X, Y)):
             self.z.append(self.model.addVar(name=f"one_of_clusters_constraint_{index}"))
             x, y = couple
@@ -305,28 +307,27 @@ class TwoClustersMIP(BaseModel):
         self.model.optimize()
         return
 
-    def predict_utility(self, X):
-        """Return Decision Function of the MIP for X. - To be completed.
+    def predict_utility(self, X: np.ndarray) -> np.array:
+        """Return Decision Function of the MIP for X.
 
         Parameters:
         -----------
         X: np.ndarray
             (n_samples, n_features) list of features of elements
+
+        Returns:
+        -----------
+        1-D numpy array
         """
-        # To be completed
-        # Do not forget that this method is called in predict_preference (line 42) and therefor should return well-organized data for it to work.
+
         criteria = np.array(
             list(
-                # enumerate(
                 map(
                     lambda x: [self.u_k(k, x, values=True) for k in range(self.K)],
                     X,
                 )
-                # )
             )
         )
-
-        # sorted_crit = sorted(criteria, key=lambda l: l[1])
 
         return criteria
 
@@ -336,17 +337,23 @@ class HeuristicModel(BaseModel):
     You have to encapsulate your code within this class that will be called for evaluation.
     """
 
-    def __init__(self):
+    def __init__(self, n_clusters, n_pieces=5, n_criteria=10):
         """Initialization of the Heuristic Model."""
         self.seed = 123
-        self.models = self.instantiate()
+        self.K = n_clusters
+        self.L = n_pieces
+        self.n = n_criteria
+        self.instantiate()
+        self.train_samples_limit = 4000
 
     def instantiate(self):
         """Instantiation of the MIP Variables"""
-        # To be completed
+        self.preprocessing = Pipeline(("std_scaler", StandardScaler()))
+        self.k_means = KMeans(n_clusters=self.K)
+        self.utility_functions = [k for k in range(self.K)]
         return
 
-    def fit(self, X, Y):
+    def fit(self, X, Y, labels=None, iterations=40):
         """Estimation of the parameters - To be completed.
 
         Parameters
@@ -356,8 +363,74 @@ class HeuristicModel(BaseModel):
         Y: np.ndarray
             (n_samples, n_features) features of unchosen elements
         """
-        # To be completed
+
+        X = X[: self.train_samples_limit]
+        Y = Y[: self.train_samples_limit]
+        if labels:
+            labels = labels[: self.train_samples_limit]
+        results = {"explained": [], "grouped": []}
+        diff = X - Y
+
+        data_to_be_clustered = diff
+
+        pairs_explained = metrics.PairsExplained()
+        cluster_intersection = metrics.ClusterIntersection()
+
+        k_means_init = "k-means++"
+
+        for i in range(iterations):
+
+            print(
+                f"################################ ITERATION {i} #################################"
+            )
+            self.k_means = KMeans(n_clusters=self.K)
+            self.k_means.fit(data_to_be_clustered)
+
+            self.UTAs = [
+                PairwiseUTA(n_criteria=self.n, n_pieces=self.L) for k in range(self.K)
+            ]
+
+            for cluster in range(self.K):
+                print(
+                    f"------------------ TRAINING CLUSTER {cluster} ------------------ "
+                )
+                cluster_X = X[lbls == cluster, :]
+                cluster_Y = Y[lbls == cluster, :]
+                self.UTAs[cluster].fit(cluster_X, cluster_Y)
+
+            row1 = X[0, :].reshape(-1, self.n)
+
+            self.predict_utility(row1)
+
+            eval_X = np.apply_along_axis(self.predict_utility, axis=1, arr=X)
+            eval_Y = np.apply_along_axis(self.predict_utility, axis=1, arr=Y)
+
+            if labels is not None:
+                explained = pairs_explained.from_model(self, X, Y)
+                grouped = cluster_intersection.from_model(self, X, Y, labels)
+
+                results["explained"].append(explained)
+                results["grouped"].append(grouped)
+
+            data_to_be_clustered = np.hstack((diff, eval_X - eval_Y))
+            if type(k_means_init) == str:
+                k_means_init = np.concatenate(
+                    (
+                        self.k_means.cluster_centers_[0],
+                        np.array([0 for i in range(self.K)]),
+                    ),
+                    axis=None,
+                )
+            else:
+                k_means_init = self.k_means.cluster_centers_[0]
+
+        if labels:
+            print(results)
+
         return
+
+    def fit_eval(self, X, Y, Z, iterations=10):
+        self.fit(X, Y, labels=Z, iterations=iterations)
 
     def predict_utility(self, X):
         """Return Decision Function of the MIP for X. - To be completed.
@@ -367,6 +440,15 @@ class HeuristicModel(BaseModel):
         X: np.ndarray
             (n_samples, n_features) list of features of elements
         """
-        # To be completed
-        # Do not forget that this method is called in predict_preference (line 42) and therefor should return well-organized data for it to work.
-        return
+
+        if len(X.shape) == 1:
+            return [self.UTAs[k].predict_utility(X) for k in range(self.K)]
+
+        else:
+            criteria = np.apply_along_axis(
+                lambda x: [self.UTAs[k].predict_utility(x) for k in range(self.K)],
+                axis=1,
+                arr=X,
+            )
+
+        return criteria
